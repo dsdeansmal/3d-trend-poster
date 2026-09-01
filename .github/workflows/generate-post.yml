@@ -1,0 +1,42 @@
+name: Generate Post For Chosen Item
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_url:
+        description: "URL of the model you chose from today's picks"
+        required: true
+      category:
+        description: "everyday or novelty"
+        required: true
+        default: "everyday"
+      photo_url:
+        description: "(optional) paste a finished-print photo URL if you want to force it"
+        required: false
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate captions + fetch photo
+        run: |
+          if [ -n "${{ inputs.photo_url }}" ]; then
+            python scripts/generate_post.py --url "${{ inputs.model_url }}" --category "${{ inputs.category }}" --photo-url "${{ inputs.photo_url }}"
+          else
+            python scripts/generate_post.py --url "${{ inputs.model_url }}" --category "${{ inputs.category }}"
+          fi
+
+      - name: Upload result as downloadable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: post-package
+          path: output/
