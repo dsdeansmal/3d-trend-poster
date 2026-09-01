@@ -8,26 +8,22 @@ buckets, writes:
   - docs/index.html          (human-readable page, published via GitHub Pages)
 And optionally pushes a Telegram message with the day's picks.
 
-This script only ever reads public pages. No login, no API key required
-for the scraping part. Telegram push is optional (set TELEGRAM_BOT_TOKEN
-and TELEGRAM_CHAT_ID as GitHub Secrets to enable it).
+v2: uses cloudscraper instead of plain requests, because MakerWorld/Cults3D
+sit behind bot-detection that blocks plain requests silently (you get a
+200 response with an empty/near-empty page, no error). cloudscraper solves
+the common cases of this. Debug logging is included so if a source still
+comes back empty, the Actions log will show the response status/length
+and a content snippet to help diagnose why.
 """
 
 import os
 import re
 import json
 import time
-import requests
+import cloudscraper
 from datetime import datetime, timezone
 from bs4 import BeautifulSoup
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-}
-
-# Each source: where to look, how to recognize a model link, and how to
-# turn a relative link into a full URL.
 SOURCES = [
     {
         "name": "MakerWorld",
@@ -57,7 +53,12 @@ NOVELTY_KEYWORDS = [
     "dinosaur", "skull", "fantasy", "anime", "hopper", "spinner",
 ]
 
-MAX_PER_CATEGORY = 8  # aim for 5-10 per your request
+MAX_PER_CATEGORY = 8
+
+# a fresh scraper "session" that mimics a real browser's TLS/JS-challenge handling
+scraper = cloudscraper.create_scraper(
+    browser={"browser": "chrome", "platform": "windows", "mobile": False}
+)
 
 
 def guess_category(title: str) -> str:
@@ -74,16 +75,25 @@ def guess_category(title: str) -> str:
 def scrape_source(source: dict, limit: int = 30) -> list:
     items = []
     try:
-        resp = requests.get(source["url"], headers=HEADERS, timeout=20)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        print(f"[!] Could not fetch {source['name']}: {e}")
+        resp = scraper.get(source["url"], timeout=25)
+    except Exception as e:
+        print(f"[!] {source['name']}: request failed entirely: {e}")
+        return items
+
+    print(f"[DEBUG] {source['name']}: status={resp.status_code}, "
+          f"content_length={len(resp.text)}")
+
+    if resp.status_code != 200:
+        print(f"[!] {source['name']}: non-200 response, first 300 chars:\n{resp.text[:300]}")
         return items
 
     soup = BeautifulSoup(resp.text, "html.parser")
     seen = set()
 
-    for a in soup.find_all("a", href=True):
+    all_links = soup.find_all("a", href=True)
+    print(f"[DEBUG] {source['name']}: found {len(all_links)} total <a> tags on page")
+
+    for a in all_links:
         href = a["href"]
         if not source["link_pattern"].match(href):
             continue
@@ -114,6 +124,10 @@ def scrape_source(source: dict, limit: int = 30) -> list:
         if len(items) >= limit:
             break
 
+    if not items:
+        print(f"[!] {source['name']}: 0 matching items. Page snippet for debugging:")
+        print(resp.text[:500])
+
     return items
 
 
@@ -129,7 +143,6 @@ def build_daily_picks() -> dict:
     everyday = [i for i in all_items if i["category"] == "everyday"][:MAX_PER_CATEGORY]
     novelty = [i for i in all_items if i["category"] == "novelty"][:MAX_PER_CATEGORY]
 
-    # top up to at least 5 each from "uncategorized" if a bucket is thin
     leftovers = [i for i in all_items if i["category"] == "uncategorized"]
     while len(everyday) < 5 and leftovers:
         everyday.append(leftovers.pop(0))
@@ -168,6 +181,11 @@ def write_html(picks: dict, path: str = "docs/index.html"):
     everyday_cards = "".join(card(i, n + 1) for n, i in enumerate(picks["everyday"]))
     novelty_cards = "".join(card(i, n + 1) for n, i in enumerate(picks["novelty"]))
 
+    empty_note = ""
+    if not picks["everyday"] and not picks["novelty"]:
+        empty_note = ("<p style='color:#b00'>No items found today -- check the "
+                       "Actions log for the 'scrape' step for debug details.</p>")
+
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -190,6 +208,7 @@ def write_html(picks: dict, path: str = "docs/index.html"):
 <body>
   <h1>Today's Trending 3D Prints</h1>
   <div class="meta">Generated {picks['generated_at_utc']} &middot; all free downloads</div>
+  {empty_note}
 
   <h2>Everyday / Household</h2>
   <div class="grid">{everyday_cards}</div>
@@ -207,10 +226,10 @@ def write_html(picks: dict, path: str = "docs/index.html"):
 def send_telegram(picks: dict):
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-    pages_url = os.environ.get("PAGES_URL", "")  # e.g. https://yourname.github.io/3d-trend-poster/
+    pages_url = os.environ.get("PAGES_URL", "")
 
     if not token or not chat_id:
-        print("Telegram not configured (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID missing) -- skipping push.")
+        print("Telegram not configured -- skipping push.")
         return
 
     lines = ["*Today's Trending 3D Prints* \U0001F5A8\n", "*Everyday:*"]
@@ -224,14 +243,14 @@ def send_telegram(picks: dict):
 
     text = "\n".join(lines)
     try:
-        requests.post(
+        scraper.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
             data={"chat_id": chat_id, "text": text, "parse_mode": "Markdown",
                   "disable_web_page_preview": True},
             timeout=15,
         )
         print("Telegram message sent.")
-    except requests.RequestException as e:
+    except Exception as e:
         print(f"[!] Telegram send failed: {e}")
 
 
