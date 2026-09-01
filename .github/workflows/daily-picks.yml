@@ -1,0 +1,39 @@
+name: Daily Trending 3D Picks
+
+on:
+  schedule:
+    # 08:13 UTC every day -- adjust to whatever local morning time you want
+    # (offset from :00 on purpose, GitHub asks you not to schedule on the hour)
+    - cron: "13 8 * * *"
+  workflow_dispatch: {}   # lets you also trigger it manually from the Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run scraper
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PAGES_URL: ${{ vars.PAGES_URL }}   # e.g. https://<you>.github.io/<repo>/
+        run: python scripts/find_trending.py
+
+      - name: Commit updated picks
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/latest_picks.json docs/index.html
+          git diff --cached --quiet || git commit -m "Daily trending picks $(date -u +'%Y-%m-%d')"
+          git push
